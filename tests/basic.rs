@@ -14,11 +14,13 @@ struct Accumulator(usize);
 
 impl Actor for Accumulator {}
 
+#[derive(Debug)]
 struct Inc;
 impl Message for Inc {
     type Result = ();
 }
 
+#[derive(Debug)]
 struct Report;
 impl Message for Report {
     type Result = Accumulator;
@@ -68,6 +70,7 @@ impl Actor for DropTester {
     }
 }
 
+#[derive(Debug)]
 struct Stop;
 
 impl Message for Stop {
@@ -114,6 +117,7 @@ async fn test_stop_and_drop() {
     assert_eq!(drop_count.load(Ordering::SeqCst), 3);
 }
 
+#[derive(Debug)]
 struct StreamCancelMessage;
 
 impl Message for StreamCancelMessage {

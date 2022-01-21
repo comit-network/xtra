@@ -26,6 +26,7 @@ impl Actor for Printer {
     }
 }
 
+#[derive(Debug)]
 struct Print(String);
 impl Message for Print {
     type Result = ();

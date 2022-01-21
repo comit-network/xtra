@@ -6,6 +6,13 @@ impl Message for Initialized {
     type Result = ();
 }
 
+impl std::fmt::Debug for Initialized {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Initialized").finish()
+    }
+}
+
+#[derive(Debug)]
 struct Hello;
 impl Message for Hello {
     type Result = ();

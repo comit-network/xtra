@@ -4,6 +4,7 @@ use tracing::{Instrument, Span};
 /// Instrument a message with `tracing`. This will attach the message handler span to the given
 /// `parent` span. If `IS_CHILD` is true, the message handler span will be instrumented with the
 ///`parent` span. Otherwise, its span will be set as following from the `parent` span.
+#[derive(Debug)]
 pub struct Instrumented<M: Message, const IS_CHILD: bool> {
     /// The underlying message whose handler will be instrumented
     pub msg: M,
