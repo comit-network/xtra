@@ -266,62 +266,46 @@ impl<A: Actor> Context<A> {
     ) -> ContinueManageLoop {
         match msg {
             Either::Left(BroadcastMessage::Message(msg)) => {
-                let mut time_spent = 0;
-                let sleep = 10;
-                let msg_str = msg.name();
-                let mut msg_handler = msg.handle(actor, self);
+                #[cfg(feature = "metrics")]
+                let timer = {
+                    let actor_name = std::any::type_name::<A>();
+                    let msg_str = msg.name();
 
-                loop {
-                    match future::select(msg_handler, Delay::new(Duration::from_secs(sleep))).await
-                    {
-                        Either::Left(((), _)) => break,
-                        Either::Right(((), unfinished_handler)) => {
-                            time_spent += sleep;
+                    let histogram =
+                        PROCESSING_DURATION_HISTOGRAM.with(&std::collections::HashMap::from([
+                            (ACTOR_LABEL, actor_name),
+                            (MESSAGE_LABEL, msg_str),
+                        ]));
+                    histogram.start_timer()
+                };
 
-                            let actor_name = std::any::type_name::<A>();
+                msg.handle(actor, self).await;
 
-                            log::warn!(
-                                "Actor {} has been processing message {} for {} seconds",
-                                actor_name,
-                                msg_str,
-                                time_spent
-                            );
-
-                            msg_handler = unfinished_handler;
-                        }
-                    }
-                }
+                #[cfg(feature = "metrics")]
+                timer.observe_duration();
             }
             Either::Left(BroadcastMessage::Shutdown) => {
                 self.running = RunningState::Stopped;
                 return ContinueManageLoop::ExitImmediately;
             }
             Either::Right(AddressMessage::Message(msg)) => {
-                let mut time_spent = 0;
-                let sleep = 10;
-                let msg_str = msg.name();
-                let mut msg_handler = msg.handle(actor, self);
+                #[cfg(feature = "metrics")]
+                let timer = {
+                    let actor_name = std::any::type_name::<A>();
+                    let msg_str = msg.name();
 
-                loop {
-                    match future::select(msg_handler, Delay::new(Duration::from_secs(sleep))).await
-                    {
-                        Either::Left(((), _)) => break,
-                        Either::Right(((), unfinished_handler)) => {
-                            time_spent += sleep;
+                    let histogram =
+                        PROCESSING_DURATION_HISTOGRAM.with(&std::collections::HashMap::from([
+                            (ACTOR_LABEL, actor_name),
+                            (MESSAGE_LABEL, msg_str),
+                        ]));
+                    histogram.start_timer()
+                };
 
-                            let actor_name = std::any::type_name::<A>();
+                msg.handle(actor, self).await;
 
-                            log::warn!(
-                                "Actor {} has been processing message {} for {} seconds",
-                                actor_name,
-                                msg_str,
-                                time_spent
-                            );
-
-                            msg_handler = unfinished_handler;
-                        }
-                    }
-                }
+                #[cfg(feature = "metrics")]
+                timer.observe_duration();
             }
             Either::Right(AddressMessage::LastAddress) => {
                 if self.ref_counter.strong_count() == 0 {
@@ -525,4 +509,21 @@ impl Display for ActorShutdown {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str("Actor is shutting down")
     }
+}
+
+#[cfg(feature = "metrics")]
+const ACTOR_LABEL: &str = "actor";
+
+#[cfg(feature = "metrics")]
+const MESSAGE_LABEL: &str = "message";
+
+#[cfg(feature = "metrics")]
+lazy_static::lazy_static! {
+    static ref PROCESSING_DURATION_HISTOGRAM: prometheus::HistogramVec = prometheus::register_histogram_vec!(
+        "xtra_message_processing_duration_seconds",
+        "The processing time of an xtra message in seconds.",
+        &[ACTOR_LABEL, MESSAGE_LABEL],
+        vec![0.0000001, 0.000001, 0.000002, 0.000005, 0.00001, 0.0001, 0.001, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0]
+    )
+    .unwrap();
 }
