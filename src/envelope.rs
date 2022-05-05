@@ -5,7 +5,7 @@ use futures_core::future::BoxFuture;
 use futures_util::FutureExt;
 
 use crate::context::Context;
-use crate::{Actor, Handler, Message, MessageName};
+use crate::{Actor, Handler, Message};
 
 /// A message envelope is a struct that encapsulates a message and its return channel sender (if applicable).
 /// Firstly, this allows us to be generic over returning and non-returning messages (as all use the
@@ -13,7 +13,7 @@ use crate::{Actor, Handler, Message, MessageName};
 /// allows us to erase the type of the message when this is in dyn Trait format, thereby being able to
 /// use only one channel to send all the kinds of messages that the actor can receives. This does,
 /// however, induce a bit of allocation (as envelopes have to be boxed).
-pub(crate) trait MessageEnvelope: Send + MessageName {
+pub(crate) trait MessageEnvelope: Send {
     /// The type of actor that this envelope carries a message for
     type Actor;
 
@@ -112,12 +112,6 @@ impl<A: Handler<M>, M: Message> MessageEnvelope for ReturningEnvelope<A, M> {
     }
 }
 
-impl<A: Handler<M>, M: Message> MessageName for ReturningEnvelope<A, M> {
-    fn name(&self) -> &'static str {
-        self.message.name()
-    }
-}
-
 /// An envelope that does not return a result from a message. Constructed  by the `AddressExt::do_send`
 /// method.
 pub(crate) struct NonReturningEnvelope<A, M: Message> {
@@ -166,12 +160,6 @@ impl<A: Handler<M>, M: Message> MessageEnvelope for NonReturningEnvelope<A, M> {
 
             act.handle(self.message, ctx).map(|_| ()).await
         })
-    }
-}
-
-impl<A: Handler<M>, M: Message> MessageName for NonReturningEnvelope<A, M> {
-    fn name(&self) -> &'static str {
-        self.message.name()
     }
 }
 

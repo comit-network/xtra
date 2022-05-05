@@ -57,19 +57,6 @@ pub trait Message: Send + 'static {
     type Result: Send;
 }
 
-pub(crate) trait MessageName {
-    fn name(&self) -> &'static str;
-}
-
-impl<M> MessageName for M
-where
-    M: Message,
-{
-    fn name(&self) -> &'static str {
-        std::any::type_name::<M>()
-    }
-}
-
 /// A trait indicating that an [`Actor`](trait.Actor.html) can handle a given [`Message`](trait.Message.html)
 /// asynchronously, and the logic to handle the message.
 ///
