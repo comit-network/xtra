@@ -51,6 +51,8 @@ pub(crate) struct ReturningEnvelope<A, M: Message> {
     message: M,
     result_sender: Sender<M::Result>,
     phantom: PhantomData<fn() -> A>,
+    #[cfg(feature = "metrics")]
+    queue_timer: prometheus::HistogramTimer,
 }
 
 impl<A: Actor, M: Message> ReturningEnvelope<A, M> {
@@ -60,6 +62,13 @@ impl<A: Actor, M: Message> ReturningEnvelope<A, M> {
             message,
             result_sender: tx,
             phantom: PhantomData,
+            #[cfg(feature = "metrics")]
+            queue_timer: QUEUEING_DURATION_HISTOGRAM
+                .with(&std::collections::HashMap::from([
+                    (ACTOR_LABEL, std::any::type_name::<A>()),
+                    (MESSAGE_LABEL, std::any::type_name::<M>()),
+                ]))
+                .start_timer(),
         };
 
         (envelope, rx)
@@ -77,12 +86,18 @@ impl<A: Handler<M>, M: Message> MessageEnvelope for ReturningEnvelope<A, M> {
         let Self {
             message,
             result_sender,
+            queue_timer,
             ..
         } = *self;
-        Box::pin(act.handle(message, ctx).map(move |r| {
-            // We don't actually care if the receiver is listening
-            let _ = result_sender.send(r);
-        }))
+        Box::pin(async move {
+            #[cfg(feature = "metrics")]
+            queue_timer.observe_duration();
+
+            act.handle(message, ctx).map(move |r| {
+                // We don't actually care if the receiver is listening
+                let _ = result_sender.send(r);
+            }).await
+        })
     }
 }
 
@@ -97,6 +112,8 @@ impl<A: Handler<M>, M: Message> MessageName for ReturningEnvelope<A, M> {
 pub(crate) struct NonReturningEnvelope<A, M: Message> {
     message: M,
     phantom: PhantomData<fn() -> A>,
+    #[cfg(feature = "metrics")]
+    queue_timer: prometheus::HistogramTimer,
 }
 
 impl<A: Actor, M: Message> NonReturningEnvelope<A, M> {
@@ -104,6 +121,13 @@ impl<A: Actor, M: Message> NonReturningEnvelope<A, M> {
         NonReturningEnvelope {
             message,
             phantom: PhantomData,
+            #[cfg(feature = "metrics")]
+            queue_timer: QUEUEING_DURATION_HISTOGRAM
+                .with(&std::collections::HashMap::from([
+                    (ACTOR_LABEL, std::any::type_name::<A>()),
+                    (MESSAGE_LABEL, std::any::type_name::<M>()),
+                ]))
+                .start_timer(),
         }
     }
 }
@@ -116,7 +140,12 @@ impl<A: Handler<M>, M: Message> MessageEnvelope for NonReturningEnvelope<A, M> {
         act: &'a mut Self::Actor,
         ctx: &'a mut Context<Self::Actor>,
     ) -> BoxFuture<'a, ()> {
-        Box::pin(act.handle(self.message, ctx).map(|_| ()))
+        Box::pin(async move {
+            #[cfg(feature = "metrics")]
+            self.queue_timer.observe_duration();
+
+            act.handle(self.message, ctx).map(|_| ()).await
+        })
     }
 }
 
@@ -138,6 +167,13 @@ impl<A: Handler<M>, M: Message + Clone + Sync> BroadcastMessageEnvelope
         Box::new(NonReturningEnvelope {
             message: self.message.clone(),
             phantom: PhantomData,
+            #[cfg(feature = "metrics")]
+            queue_timer: QUEUEING_DURATION_HISTOGRAM
+                .with(&std::collections::HashMap::from([
+                    (ACTOR_LABEL, std::any::type_name::<A>()),
+                    (MESSAGE_LABEL, std::any::type_name::<M>()),
+                ]))
+                .start_timer(),
         })
     }
 }
@@ -146,4 +182,21 @@ impl<A> Clone for Box<dyn BroadcastMessageEnvelope<Actor = A>> {
     fn clone(&self) -> Self {
         BroadcastMessageEnvelope::clone(&**self)
     }
+}
+
+#[cfg(feature = "metrics")]
+const ACTOR_LABEL: &str = "actor";
+
+#[cfg(feature = "metrics")]
+const MESSAGE_LABEL: &str = "message";
+
+#[cfg(feature = "metrics")]
+lazy_static::lazy_static! {
+    static ref QUEUEING_DURATION_HISTOGRAM: prometheus::HistogramVec = prometheus::register_histogram_vec!(
+        "xtra_message_queueing_duration_seconds",
+        "The time of an xtra message from creation to being processed in seconds.",
+        &[ACTOR_LABEL, MESSAGE_LABEL],
+        vec![0.0000001, 0.000001, 0.000002, 0.000005, 0.00001, 0.0001, 0.001, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0]
+    )
+    .unwrap();
 }
