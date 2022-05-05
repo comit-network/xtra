@@ -93,10 +93,21 @@ impl<A: Handler<M>, M: Message> MessageEnvelope for ReturningEnvelope<A, M> {
             #[cfg(feature = "metrics")]
             queue_timer.observe_duration();
 
-            act.handle(message, ctx).map(move |r| {
-                // We don't actually care if the receiver is listening
-                let _ = result_sender.send(r);
-            }).await
+            #[cfg(feature = "metrics")]
+            let _processing_timer_will_automatically_observe_on_drop =
+                PROCESSING_DURATION_HISTOGRAM
+                    .with(&std::collections::HashMap::from([
+                        (ACTOR_LABEL, std::any::type_name::<A>()),
+                        (MESSAGE_LABEL, std::any::type_name::<M>()),
+                    ]))
+                    .start_timer();
+
+            act.handle(message, ctx)
+                .map(move |r| {
+                    // We don't actually care if the receiver is listening
+                    let _ = result_sender.send(r);
+                })
+                .await
         })
     }
 }
@@ -143,6 +154,15 @@ impl<A: Handler<M>, M: Message> MessageEnvelope for NonReturningEnvelope<A, M> {
         Box::pin(async move {
             #[cfg(feature = "metrics")]
             self.queue_timer.observe_duration();
+
+            #[cfg(feature = "metrics")]
+            let _processing_timer_will_automatically_observe_on_drop =
+                PROCESSING_DURATION_HISTOGRAM
+                    .with(&std::collections::HashMap::from([
+                        (ACTOR_LABEL, std::any::type_name::<A>()),
+                        (MESSAGE_LABEL, std::any::type_name::<M>()),
+                    ]))
+                    .start_timer();
 
             act.handle(self.message, ctx).map(|_| ()).await
         })
@@ -195,6 +215,17 @@ lazy_static::lazy_static! {
     static ref QUEUEING_DURATION_HISTOGRAM: prometheus::HistogramVec = prometheus::register_histogram_vec!(
         "xtra_message_queueing_duration_seconds",
         "The time of an xtra message from creation to being processed in seconds.",
+        &[ACTOR_LABEL, MESSAGE_LABEL],
+        vec![0.0000001, 0.000001, 0.000002, 0.000005, 0.00001, 0.0001, 0.001, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0]
+    )
+    .unwrap();
+}
+
+#[cfg(feature = "metrics")]
+lazy_static::lazy_static! {
+    static ref PROCESSING_DURATION_HISTOGRAM: prometheus::HistogramVec = prometheus::register_histogram_vec!(
+        "xtra_message_processing_duration_seconds",
+        "The processing time of an xtra message in seconds.",
         &[ACTOR_LABEL, MESSAGE_LABEL],
         vec![0.0000001, 0.000001, 0.000002, 0.000005, 0.00001, 0.0001, 0.001, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0]
     )
