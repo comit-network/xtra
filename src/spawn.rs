@@ -9,6 +9,12 @@ pub use tokio_impl::*;
 #[cfg(feature = "with-wasm_bindgen-0_2")]
 pub use wasm_bindgen_impl::*;
 
+#[cfg(any(
+    feature = "with-async_std-1",
+    feature = "with-smol-1",
+    feature = "with-tokio-1",
+    feature = "with-wasm_bindgen-0_2"
+))]
 use crate::{Actor, ActorManager, Address};
 
 /// An `Spawner` represents anything that can spawn a future to be run in the background. This is
