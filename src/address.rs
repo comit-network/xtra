@@ -157,10 +157,11 @@ impl<A, Rc: RefCounter> Address<A, Rc> {
     ///
     /// ```rust
     /// # use xtra::prelude::*;
+    /// # use xtra::KeepRunning;
     /// # use xtra::spawn::Smol;
     /// # use std::time::Duration;
     /// # struct MyActor;
-    /// # #[async_trait::async_trait] impl Actor for MyActor {type Stop = (); async fn stopped(self) -> Self::Stop {} }
+    /// # #[async_trait::async_trait] impl Actor for MyActor {type Stop = (); async fn stopped(self) -> Self::Stop {} async fn stopping(&mut self, ctx: &mut Context<Self>) -> KeepRunning { KeepRunning::StopAll } }
     /// # use smol::Timer;
     /// struct Shutdown;
     ///
