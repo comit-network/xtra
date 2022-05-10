@@ -86,6 +86,7 @@ impl<A: Handler<M>, M: Message> MessageEnvelope for ReturningEnvelope<A, M> {
         let Self {
             message,
             result_sender,
+            #[cfg(feature = "metrics")]
             queue_timer,
             ..
         } = *self;

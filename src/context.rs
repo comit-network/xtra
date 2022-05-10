@@ -37,6 +37,7 @@ pub struct Context<A> {
     shared_drop_notifier: Arc<DropNotifier>,
     /// Activates when this context is dropped. Used in [`Context::notify_interval`] and [`Context::notify_after`]
     /// to shutdown the tasks as soon as the context stops.
+    #[cfg(feature = "timing")]
     drop_notifier: DropNotifier,
 }
 
@@ -100,6 +101,7 @@ impl<A: Actor> Context<A> {
             receiver,
             broadcast_receiver: broadcast_rx.into_shared(),
             shared_drop_notifier,
+            #[cfg(feature = "timing")]
             drop_notifier: DropNotifier::new(),
         };
         (addr, context)
@@ -121,6 +123,7 @@ impl<A: Actor> Context<A> {
             receiver: self.receiver.clone(),
             broadcast_receiver,
             shared_drop_notifier: self.shared_drop_notifier.clone(),
+            #[cfg(feature = "timing")]
             drop_notifier: DropNotifier::new(),
         };
         ctx.run(actor)
@@ -441,6 +444,7 @@ impl<A: Actor> Context<A> {
 
     /// Notify the actor with a message after a certain duration has elapsed. This does not take
     /// priority over other messages.
+    #[cfg(feature = "timing")]
     pub fn notify_after<M>(
         &mut self,
         duration: Duration,
