@@ -6,7 +6,7 @@ use std::future::Future;
 use std::mem;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::{cmp::Ordering, error::Error, hash::Hash};
+use std::{cmp::Ordering, hash::Hash};
 
 use catty::Receiver;
 use flume::r#async::SendFut as ChannelSendFuture;
@@ -42,17 +42,18 @@ impl<A: Actor, M: Message> Default for SendFutureInner<A, M> {
     }
 }
 
-pub(crate) fn poll_rx<T>(rx: &mut Receiver<T>, ctx: &mut Context) -> Poll<Result<T, Disconnected>> {
-    rx.poll_unpin(ctx).map(|r| r.map_err(|_| Disconnected))
+pub(crate) fn poll_rx<T>(rx: &mut Receiver<T>, ctx: &mut Context) -> Poll<Result<T, Error>> {
+    rx.poll_unpin(ctx)
+        .map(|r| r.map_err(|_| Error::Disconnected))
 }
 
 impl<A: Actor, M: Message> Future for SendFuture<A, M> {
-    type Output = Result<M::Result, Disconnected>;
+    type Output = Result<M::Result, Error>;
 
     fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
         let this = self.get_mut();
         let (poll, new) = match mem::take(&mut this.0) {
-            old @ SendFutureInner::Disconnected => (Poll::Ready(Err(Disconnected)), old),
+            old @ SendFutureInner::Disconnected => (Poll::Ready(Err(Error::Disconnected)), old),
             SendFutureInner::Sending(mut tx, mut rx) => {
                 if tx.poll_unpin(ctx).is_ready() {
                     (poll_rx(&mut rx, ctx), SendFutureInner::Receiving(rx))
@@ -81,31 +82,38 @@ enum DoSendFutureInner<A: Actor> {
 }
 
 impl<A: Actor> Future for DoSendFuture<A> {
-    type Output = Result<(), Disconnected>;
+    type Output = Result<(), Error>;
 
     fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
         match &mut self.get_mut().0 {
-            DoSendFutureInner::Disconnected => Poll::Ready(Err(Disconnected)),
-            DoSendFutureInner::Send(tx) => {
-                tx.poll_unpin(ctx).map(|res| res.map_err(|_| Disconnected))
-            }
+            DoSendFutureInner::Disconnected => Poll::Ready(Err(Error::Disconnected)),
+            DoSendFutureInner::Send(tx) => tx
+                .poll_unpin(ctx)
+                .map(|res| res.map_err(|_| Error::Disconnected)),
         }
     }
 }
 
-/// The actor is no longer running and disconnected from the sending address. For why this could
-/// occur, see the [`Actor::stopping`](../trait.Actor.html#method.stopping) and
-/// [`Actor::stopped`](../trait.Actor.html#method.stopped) methods.
+/// All the possible ways in which sending a message can fail.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct Disconnected;
+pub enum Error {
+    /// The actor is no longer running and disconnected from the sending address. For why this could
+    /// occur, see the [`Actor::stopping`](../trait.Actor.html#method.stopping) and
+    /// [`Actor::stopped`](../trait.Actor.html#method.stopped) methods.
+    Disconnected,
+}
 
-impl Display for Disconnected {
+impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str("Actor address disconnected")
+        let s = match self {
+            Error::Disconnected => "Actor address disconnected",
+        };
+
+        f.write_str(s)
     }
 }
 
-impl Error for Disconnected {}
+impl std::error::Error for Error {}
 
 /// An `Address` is a reference to an actor through which [`Message`s](../trait.Message.html) can be
 /// sent. It can be cloned to create more addresses to the same actor.
@@ -216,7 +224,7 @@ impl<A, Rc: RefCounter> Address<A, Rc> {
     /// actor is stopped and not accepting messages. If this returns `Ok(())`, the will be delivered,
     /// but may not be handled in the event that the actor stops itself (by calling
     /// [`Context::stop`](../struct.Context.html#method.stop)) before it was handled.
-    pub fn do_send<M>(&self, message: M) -> Result<(), Disconnected>
+    pub fn do_send<M>(&self, message: M) -> Result<(), Error>
     where
         M: Message,
         A: Handler<M>,
@@ -226,9 +234,9 @@ impl<A, Rc: RefCounter> Address<A, Rc> {
             let envelope = NonReturningEnvelope::<A, M>::new(message);
             self.sender
                 .send(AddressMessage::Message(Box::new(envelope)))
-                .map_err(|_| Disconnected)
+                .map_err(|_| Error::Disconnected)
         } else {
-            Err(Disconnected)
+            Err(Error::Disconnected)
         }
     }
 

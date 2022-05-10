@@ -10,7 +10,7 @@ use catty::Receiver;
 use futures_core::future::BoxFuture;
 use futures_core::stream::BoxStream;
 
-use crate::address::{self, Address, Disconnected, WeakAddress};
+use crate::address::{self, Address, Error, WeakAddress};
 use crate::envelope::ReturningEnvelope;
 use crate::manager::AddressMessage;
 use crate::private::Sealed;
@@ -29,11 +29,11 @@ enum SendFutureInner<M: Message> {
 }
 
 impl<M: Message> Future for SendFuture<M> {
-    type Output = Result<M::Result, Disconnected>;
+    type Output = Result<M::Result, Error>;
 
     fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
         match &mut self.get_mut().0 {
-            SendFutureInner::Disconnected => Poll::Ready(Err(Disconnected)),
+            SendFutureInner::Disconnected => Poll::Ready(Err(Error::Disconnected)),
             SendFutureInner::Result(rx) => address::poll_rx(rx, ctx),
         }
     }
@@ -125,7 +125,7 @@ pub trait MessageChannel<M: Message>: Sealed + Unpin + Send + Sync {
     /// If this returns `Ok(())`, the will be delivered, but may not be handled in the event that the
     /// actor stops itself (by calling [`Context::stop`](../struct.Context.html#method.stop))
     /// before it was handled.
-    fn do_send(&self, message: M) -> Result<(), Disconnected>;
+    fn do_send(&self, message: M) -> Result<(), Error>;
 
     /// Send a [`Message`](../trait.Message.html) to the actor and asynchronously wait for a response. If this
     /// returns `Err(Disconnected)`, then the actor is stopped and not accepting messages. This,
@@ -230,7 +230,7 @@ where
         self.capacity()
     }
 
-    fn do_send(&self, message: M) -> Result<(), Disconnected> {
+    fn do_send(&self, message: M) -> Result<(), Error> {
         self.do_send(message)
     }
 

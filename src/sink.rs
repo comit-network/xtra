@@ -8,7 +8,7 @@ use flume::r#async::SendSink;
 use futures_sink::Sink;
 use futures_util::SinkExt;
 
-use crate::address::Disconnected;
+use crate::address::Error;
 use crate::envelope::NonReturningEnvelope;
 use crate::manager::AddressMessage;
 use crate::private::Sealed;
@@ -69,37 +69,37 @@ impl<A, Rc: RefCounter, M: Message> Sink<M> for AddressSink<A, Rc>
 where
     A: Handler<M>,
 {
-    type Error = Disconnected;
+    type Error = Error;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Pin::new(&mut self.sink)
             .poll_ready(cx)
-            .map_err(|_| Disconnected)
+            .map_err(|_| Error::Disconnected)
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: M) -> Result<(), Self::Error> {
         let item = AddressMessage::Message(Box::new(NonReturningEnvelope::new(item)));
         Pin::new(&mut self.sink)
             .start_send(item)
-            .map_err(|_| Disconnected)
+            .map_err(|_| Error::Disconnected)
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Pin::new(&mut self.sink)
             .poll_flush(cx)
-            .map_err(|_| Disconnected)
+            .map_err(|_| Error::Disconnected)
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Pin::new(&mut self.sink)
             .poll_close(cx)
-            .map_err(|_| Disconnected)
+            .map_err(|_| Error::Disconnected)
     }
 }
 
 /// A `MessageSink` is similar to a [`MessageChannel`](../message_channel/trait.MessageChannel.html),
 /// but it is a sink and operates asynchronously.
-pub trait MessageSink<M: Message>: Sealed + Sink<M, Error = Disconnected> + Unpin + Send {
+pub trait MessageSink<M: Message>: Sealed + Sink<M, Error = Error> + Unpin + Send {
     /// Returns whether the actor referred to by this message sink is running and accepting messages.
     fn is_connected(&self) -> bool;
 
@@ -186,11 +186,11 @@ where
         Box::new(AddressSink::downgrade(&self))
     }
 
-    fn upcast(self) -> Box<dyn MessageSink<M, Error = Disconnected>> {
+    fn upcast(self) -> Box<dyn MessageSink<M, Error = Error>> {
         Box::new(self)
     }
 
-    fn upcast_ref(&self) -> &dyn MessageSink<M, Error = Disconnected> {
+    fn upcast_ref(&self) -> &dyn MessageSink<M, Error = Error> {
         self
     }
 
@@ -203,11 +203,11 @@ impl<A: Actor, M: Message> WeakMessageSink<M> for AddressSink<A, Weak>
 where
     A: Handler<M>,
 {
-    fn upcast(self) -> Box<dyn MessageSink<M, Error = Disconnected>> {
+    fn upcast(self) -> Box<dyn MessageSink<M, Error = Error>> {
         Box::new(self)
     }
 
-    fn upcast_ref(&self) -> &dyn MessageSink<M, Error = Disconnected> {
+    fn upcast_ref(&self) -> &dyn MessageSink<M, Error = Error> {
         self
     }
 

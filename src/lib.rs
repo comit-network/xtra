@@ -3,7 +3,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg, external_doc))]
 #![deny(unsafe_code, missing_docs)]
 
-pub use self::address::{Address, Disconnected, WeakAddress};
+pub use self::address::{Address, Error, WeakAddress};
 pub use self::context::{ActorShutdown, Context};
 pub use self::manager::ActorManager;
 
