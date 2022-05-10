@@ -9,7 +9,9 @@ use futures_util::future::{self, Either};
 use futures_util::FutureExt;
 
 #[cfg(feature = "timing")]
-use {futures_timer::Delay, std::time::Duration};
+use futures_timer::Delay;
+#[cfg(any(feature = "timing", feature = "timeout"))]
+use std::time::Duration;
 
 use crate::drop_notice::DropNotifier;
 use crate::envelope::{MessageEnvelope, NonReturningEnvelope};
@@ -39,6 +41,9 @@ pub struct Context<A> {
     /// to shutdown the tasks as soon as the context stops.
     #[cfg(feature = "timing")]
     drop_notifier: DropNotifier,
+    /// The maximum time a handler is allowed to execute before it is being force-stopped.
+    #[cfg(feature = "timeout")]
+    handler_timeout: Option<Duration>,
 }
 
 #[derive(Eq, PartialEq, Copy, Clone)]
@@ -103,6 +108,8 @@ impl<A: Actor> Context<A> {
             shared_drop_notifier,
             #[cfg(feature = "timing")]
             drop_notifier: DropNotifier::new(),
+            #[cfg(feature = "timeout")]
+            handler_timeout: None,
         };
         (addr, context)
     }
@@ -125,6 +132,8 @@ impl<A: Actor> Context<A> {
             shared_drop_notifier: self.shared_drop_notifier.clone(),
             #[cfg(feature = "timing")]
             drop_notifier: DropNotifier::new(),
+            #[cfg(feature = "timeout")]
+            handler_timeout: self.handler_timeout,
         };
         ctx.run(actor)
     }
@@ -141,6 +150,15 @@ impl<A: Actor> Context<A> {
             sender: self.sender.clone(),
             ref_counter: self.ref_counter.upgrade().ok_or(ActorShutdown)?,
         })
+    }
+
+    /// Configures this context with a timeout for handler executions.
+    #[cfg(feature = "timeout")]
+    pub fn with_handler_timeout(self, timeout: Duration) -> Self {
+        Self {
+            handler_timeout: Some(timeout),
+            ..self
+        }
     }
 
     /// Stop all actors on this address
@@ -470,6 +488,11 @@ impl<A: Actor> Context<A> {
         };
 
         Ok(fut)
+    }
+
+    #[cfg(feature = "timeout")]
+    pub(crate) fn handler_timeout(&self) -> Option<Duration> {
+        self.handler_timeout
     }
 }
 

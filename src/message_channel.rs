@@ -18,6 +18,9 @@ use crate::refcount::{RefCounter, Shared, Strong};
 use crate::sink::{AddressSink, MessageSink, StrongMessageSink, WeakMessageSink};
 use crate::{Handler, KeepRunning, Message};
 
+#[cfg(feature = "timeout")]
+use crate::envelope::TimedOut;
+
 /// The future returned [`MessageChannel::send`](trait.MessageChannel.html#method.send).
 /// It resolves to `Result<M::Result, Disconnected>`.
 #[must_use]
@@ -25,7 +28,10 @@ pub struct SendFuture<M: Message>(SendFutureInner<M>);
 
 enum SendFutureInner<M: Message> {
     Disconnected,
-    Result(Receiver<M::Result>),
+    Result(
+        Receiver<M::Result>,
+        #[cfg(feature = "timeout")] Receiver<TimedOut<M>>,
+    ),
 }
 
 impl<M: Message> Future for SendFuture<M> {
@@ -34,7 +40,10 @@ impl<M: Message> Future for SendFuture<M> {
     fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
         match &mut self.get_mut().0 {
             SendFutureInner::Disconnected => Poll::Ready(Err(Error::Disconnected)),
+            #[cfg(not(feature = "timeout"))]
             SendFutureInner::Result(rx) => address::poll_rx(rx, ctx),
+            #[cfg(feature = "timeout")]
+            SendFutureInner::Result(rx, rx_timed_out) => address::poll_rx(rx, rx_timed_out, ctx),
         }
     }
 }
@@ -236,11 +245,20 @@ where
 
     fn send(&self, message: M) -> SendFuture<M> {
         if self.is_connected() {
+            #[cfg(not(feature = "timeout"))]
             let (envelope, rx) = ReturningEnvelope::<A, M>::new(message);
+
+            #[cfg(feature = "timeout")]
+            let (envelope, rx, rx_timed_out) = ReturningEnvelope::<A, M>::new(message);
+
             let _ = self
                 .sender
                 .send(AddressMessage::Message(Box::new(envelope)));
-            SendFuture(SendFutureInner::Result(rx))
+            SendFuture(SendFutureInner::Result(
+                rx,
+                #[cfg(feature = "timeout")]
+                rx_timed_out,
+            ))
         } else {
             SendFuture(SendFutureInner::Disconnected)
         }
