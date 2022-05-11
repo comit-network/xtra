@@ -1,12 +1,13 @@
 //! An address to an actor is a way to send it a message. An address allows an actor to be sent any
 //! kind of message that it can receive.
 
+use std::borrow::Cow;
 use std::fmt::{self, Display, Formatter};
 use std::future::Future;
 use std::mem;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::{cmp::Ordering, error::Error, hash::Hash};
+use std::{self, cmp::Ordering, hash::Hash};
 
 use catty::Receiver;
 use flume::r#async::SendFut as ChannelSendFuture;
@@ -20,6 +21,9 @@ use crate::refcount::{Either, RefCounter, Strong, Weak};
 use crate::sink::AddressSink;
 use crate::{Actor, Handler, KeepRunning, Message};
 
+#[cfg(feature = "timeout")]
+use crate::envelope::TimedOut;
+
 /// The future returned [`Address::send`](struct.Address.html#method.send).
 /// It resolves to `Result<M::Result, Disconnected>`.
 // This simply wraps the enum in order to hide the implementation details of the inner future
@@ -32,8 +36,12 @@ enum SendFutureInner<A: Actor, M: Message> {
     Sending(
         ChannelSendFuture<'static, AddressMessage<A>>,
         Receiver<M::Result>,
+        #[cfg(feature = "timeout")] Receiver<TimedOut<M>>,
     ),
-    Receiving(Receiver<M::Result>),
+    Receiving(
+        Receiver<M::Result>,
+        #[cfg(feature = "timeout")] Receiver<TimedOut<M>>,
+    ),
 }
 
 impl<A: Actor, M: Message> Default for SendFutureInner<A, M> {
@@ -42,17 +50,39 @@ impl<A: Actor, M: Message> Default for SendFutureInner<A, M> {
     }
 }
 
-pub(crate) fn poll_rx<T>(rx: &mut Receiver<T>, ctx: &mut Context) -> Poll<Result<T, Disconnected>> {
-    rx.poll_unpin(ctx).map(|r| r.map_err(|_| Disconnected))
+#[cfg(not(feature = "timeout"))]
+pub(crate) fn poll_rx<T>(rx: &mut Receiver<T>, ctx: &mut Context) -> Poll<Result<T, Error>> {
+    rx.poll_unpin(ctx)
+        .map(|r| r.map_err(|_| Error::Disconnected))
+}
+
+#[cfg(feature = "timeout")]
+pub(crate) fn poll_rx<T, M>(
+    rx: &mut Receiver<T>,
+    rx_timed_out: &mut Receiver<TimedOut<M>>,
+    ctx: &mut Context,
+) -> Poll<Result<T, Error>> {
+    let result_res = rx.poll_unpin(ctx);
+    let timed_out_res = rx_timed_out.poll_unpin(ctx);
+
+    match (result_res, timed_out_res) {
+        (Poll::Ready(Ok(result)), _) => Poll::Ready(Ok(result)),
+        (_, Poll::Ready(Ok(TimedOut { .. }))) => Poll::Ready(Err(Error::TimedOut {
+            message: std::any::type_name::<M>().to_string(),
+        })),
+        (Poll::Pending, Poll::Pending) => Poll::Pending,
+        _ => Poll::Ready(Err(Error::Disconnected)),
+    }
 }
 
 impl<A: Actor, M: Message> Future for SendFuture<A, M> {
-    type Output = Result<M::Result, Disconnected>;
+    type Output = Result<M::Result, Error>;
 
     fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
         let this = self.get_mut();
         let (poll, new) = match mem::take(&mut this.0) {
-            old @ SendFutureInner::Disconnected => (Poll::Ready(Err(Disconnected)), old),
+            old @ SendFutureInner::Disconnected => (Poll::Ready(Err(Error::Disconnected)), old),
+            #[cfg(not(feature = "timeout"))]
             SendFutureInner::Sending(mut tx, mut rx) => {
                 if tx.poll_unpin(ctx).is_ready() {
                     (poll_rx(&mut rx, ctx), SendFutureInner::Receiving(rx))
@@ -60,9 +90,29 @@ impl<A: Actor, M: Message> Future for SendFuture<A, M> {
                     (Poll::Pending, SendFutureInner::Sending(tx, rx))
                 }
             }
+            #[cfg(feature = "timeout")]
+            SendFutureInner::Sending(mut tx, mut rx, mut rx_timed_out) => {
+                if tx.poll_unpin(ctx).is_ready() {
+                    (
+                        poll_rx(&mut rx, &mut rx_timed_out, ctx),
+                        SendFutureInner::Receiving(rx, rx_timed_out),
+                    )
+                } else {
+                    (
+                        Poll::Pending,
+                        SendFutureInner::Sending(tx, rx, rx_timed_out),
+                    )
+                }
+            }
+            #[cfg(not(feature = "timeout"))]
             SendFutureInner::Receiving(mut rx) => {
                 (poll_rx(&mut rx, ctx), SendFutureInner::Receiving(rx))
             }
+            #[cfg(feature = "timeout")]
+            SendFutureInner::Receiving(mut rx, mut rx_timed_out) => (
+                poll_rx(&mut rx, &mut rx_timed_out, ctx),
+                SendFutureInner::Receiving(rx, rx_timed_out),
+            ),
         };
 
         this.0 = new;
@@ -81,31 +131,48 @@ enum DoSendFutureInner<A: Actor> {
 }
 
 impl<A: Actor> Future for DoSendFuture<A> {
-    type Output = Result<(), Disconnected>;
+    type Output = Result<(), Error>;
 
     fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
         match &mut self.get_mut().0 {
-            DoSendFutureInner::Disconnected => Poll::Ready(Err(Disconnected)),
-            DoSendFutureInner::Send(tx) => {
-                tx.poll_unpin(ctx).map(|res| res.map_err(|_| Disconnected))
-            }
+            DoSendFutureInner::Disconnected => Poll::Ready(Err(Error::Disconnected)),
+            DoSendFutureInner::Send(tx) => tx
+                .poll_unpin(ctx)
+                .map(|res| res.map_err(|_| Error::Disconnected)),
         }
     }
 }
 
-/// The actor is no longer running and disconnected from the sending address. For why this could
-/// occur, see the [`Actor::stopping`](../trait.Actor.html#method.stopping) and
-/// [`Actor::stopped`](../trait.Actor.html#method.stopped) methods.
+/// All the possible ways in which sending a message can fail.
 #[derive(Clone, Eq, PartialEq, Debug)]
-pub struct Disconnected;
+pub enum Error {
+    /// The actor is no longer running and disconnected from the sending address. For why this could
+    /// occur, see the [`Actor::stopping`](../trait.Actor.html#method.stopping) and
+    /// [`Actor::stopped`](../trait.Actor.html#method.stopped) methods.
+    Disconnected,
+    /// A message has failed to be handled by the actor before the timeout expired.
+    #[cfg(feature = "timeout")]
+    TimedOut {
+        /// The name of the message which we failed to process before the timeout expired.
+        message: String,
+    },
+}
 
-impl Display for Disconnected {
+impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str("Actor address disconnected")
+        let s = match self {
+            Error::Disconnected => Cow::from("Actor address disconnected"),
+            #[cfg(feature = "timeout")]
+            Error::TimedOut { message } => {
+                Cow::from(format!("Actor timed out handling message {message}"))
+            }
+        };
+
+        f.write_str(&s)
     }
 }
 
-impl Error for Disconnected {}
+impl std::error::Error for Error {}
 
 /// An `Address` is a reference to an actor through which [`Message`s](../trait.Message.html) can be
 /// sent. It can be cloned to create more addresses to the same actor.
@@ -216,7 +283,7 @@ impl<A, Rc: RefCounter> Address<A, Rc> {
     /// actor is stopped and not accepting messages. If this returns `Ok(())`, the will be delivered,
     /// but may not be handled in the event that the actor stops itself (by calling
     /// [`Context::stop`](../struct.Context.html#method.stop)) before it was handled.
-    pub fn do_send<M>(&self, message: M) -> Result<(), Disconnected>
+    pub fn do_send<M>(&self, message: M) -> Result<(), Error>
     where
         M: Message,
         A: Handler<M>,
@@ -226,9 +293,9 @@ impl<A, Rc: RefCounter> Address<A, Rc> {
             let envelope = NonReturningEnvelope::<A, M>::new(message);
             self.sender
                 .send(AddressMessage::Message(Box::new(envelope)))
-                .map_err(|_| Disconnected)
+                .map_err(|_| Error::Disconnected)
         } else {
-            Err(Disconnected)
+            Err(Error::Disconnected)
         }
     }
 
@@ -263,12 +330,22 @@ impl<A, Rc: RefCounter> Address<A, Rc> {
         A: Handler<M>,
     {
         if self.is_connected() {
+            #[cfg(not(feature = "timeout"))]
             let (envelope, rx) = ReturningEnvelope::<A, M>::new(message);
+
+            #[cfg(feature = "timeout")]
+            let (envelope, rx, rx_timed_out) = ReturningEnvelope::<A, M>::new(message);
+
             let tx = self
                 .sender
                 .clone()
                 .into_send_async(AddressMessage::Message(Box::new(envelope)));
-            SendFuture(SendFutureInner::Sending(tx, rx))
+            SendFuture(SendFutureInner::Sending(
+                tx,
+                rx,
+                #[cfg(feature = "timeout")]
+                rx_timed_out,
+            ))
         } else {
             SendFuture(SendFutureInner::Disconnected)
         }

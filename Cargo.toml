@@ -51,10 +51,13 @@ smol = "1.1"
 smol-potat = "1.1"
 smol-timeout = "0.6"
 waker-fn = "1.1"
+tokio = { version = "1.18", features = ["macros"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "tracing-log"] }
 
 [features]
 default = ["timing"]
 timing = ["futures-timer"]
+timeout = ["futures-timer"]
 with-async_std-1 = ["async-std"]
 with-smol-1 = ["smol"]
 with-tokio-1 = ["tokio"]
@@ -94,6 +97,10 @@ required-features = ["with-smol-1"]
 [[test]]
 name = "basic"
 required-features = ["with-smol-1"]
+
+[[test]]
+name = "handler_timeout"
+required-features = ["timeout", "with-tokio-1", "tracing"]
 
 [workspace]
 members = ["examples/basic_wasm_bindgen"]

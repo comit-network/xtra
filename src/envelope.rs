@@ -4,6 +4,9 @@ use catty::{Receiver, Sender};
 use futures_core::future::BoxFuture;
 use futures_util::FutureExt;
 
+#[cfg(feature = "timeout")]
+use futures_util::future::Either;
+
 use crate::context::Context;
 use crate::{Actor, Handler, Message};
 
@@ -50,12 +53,15 @@ pub(crate) trait MessageEnvelope: Send {
 pub(crate) struct ReturningEnvelope<A, M: Message> {
     message: M,
     result_sender: Sender<M::Result>,
+    #[cfg(feature = "timeout")]
+    timed_out_sender: Sender<TimedOut<M>>,
     phantom: PhantomData<fn() -> A>,
     #[cfg(feature = "metrics")]
     queue_timer: prometheus::HistogramTimer,
 }
 
 impl<A: Actor, M: Message> ReturningEnvelope<A, M> {
+    #[cfg(not(feature = "timeout"))]
     pub(crate) fn new(message: M) -> (Self, Receiver<M::Result>) {
         let (tx, rx) = catty::oneshot();
         let envelope = ReturningEnvelope {
@@ -73,6 +79,27 @@ impl<A: Actor, M: Message> ReturningEnvelope<A, M> {
 
         (envelope, rx)
     }
+
+    #[cfg(feature = "timeout")]
+    pub(crate) fn new(message: M) -> (Self, Receiver<M::Result>, Receiver<TimedOut<M>>) {
+        let (tx, rx) = catty::oneshot();
+        let (tx_timed_out, rx_timed_out) = catty::oneshot();
+        let envelope = ReturningEnvelope {
+            message,
+            result_sender: tx,
+            timed_out_sender: tx_timed_out,
+            phantom: PhantomData,
+            #[cfg(feature = "metrics")]
+            queue_timer: QUEUEING_DURATION_HISTOGRAM
+                .with(&std::collections::HashMap::from([
+                    (ACTOR_LABEL, std::any::type_name::<A>()),
+                    (MESSAGE_LABEL, std::any::type_name::<M>()),
+                ]))
+                .start_timer(),
+        };
+
+        (envelope, rx, rx_timed_out)
+    }
 }
 
 impl<A: Handler<M>, M: Message> MessageEnvelope for ReturningEnvelope<A, M> {
@@ -88,8 +115,14 @@ impl<A: Handler<M>, M: Message> MessageEnvelope for ReturningEnvelope<A, M> {
             result_sender,
             #[cfg(feature = "metrics")]
             queue_timer,
+            #[cfg(feature = "timeout")]
+            timed_out_sender,
             ..
         } = *self;
+
+        #[cfg(feature = "timeout")]
+        let handler_timeout = ctx.handler_timeout();
+
         Box::pin(async move {
             #[cfg(feature = "metrics")]
             queue_timer.observe_duration();
@@ -103,12 +136,40 @@ impl<A: Handler<M>, M: Message> MessageEnvelope for ReturningEnvelope<A, M> {
                     ]))
                     .start_timer();
 
-            act.handle(message, ctx)
-                .map(move |r| {
-                    // We don't actually care if the receiver is listening
-                    let _ = result_sender.send(r);
-                })
-                .await
+            let handle_fut = act.handle(message, ctx).map(move |r| {
+                // We don't actually care if the receiver is listening
+                let _ = result_sender.send(r);
+            });
+
+            #[cfg(not(feature = "timeout"))]
+            handle_fut.await;
+
+            #[cfg(feature = "timeout")]
+            match handler_timeout {
+                None => handle_fut.await,
+                Some(timeout) => {
+                    let handler_with_timeout = futures_util::future::select(
+                        futures_timer::Delay::new(timeout),
+                        handle_fut,
+                    );
+
+                    if let Either::Left(((), _handler)) = handler_with_timeout.await {
+                        // Inform the sender of the message that handling it has timed out
+                        let _ = timed_out_sender.send(TimedOut {
+                            phantom: PhantomData,
+                        });
+
+                        #[cfg(feature = "tracing")]
+                        {
+                            let msg_type = std::any::type_name::<M>();
+                            let actor_type = std::any::type_name::<A>();
+                            let timeout_seconds = timeout.as_secs();
+
+                            tracing::warn!(%msg_type, %actor_type, %timeout_seconds, "Handler execution timeout");
+                        }
+                    };
+                }
+            }
         })
     }
 }
@@ -146,6 +207,9 @@ impl<A: Handler<M>, M: Message> MessageEnvelope for NonReturningEnvelope<A, M> {
         act: &'a mut Self::Actor,
         ctx: &'a mut Context<Self::Actor>,
     ) -> BoxFuture<'a, ()> {
+        #[cfg(feature = "timeout")]
+        let handler_timeout = ctx.handler_timeout();
+
         Box::pin(async move {
             #[cfg(feature = "metrics")]
             self.queue_timer.observe_duration();
@@ -159,7 +223,32 @@ impl<A: Handler<M>, M: Message> MessageEnvelope for NonReturningEnvelope<A, M> {
                     ]))
                     .start_timer();
 
-            act.handle(self.message, ctx).map(|_| ()).await
+            let handle_fut = act.handle(self.message, ctx).map(|_| ());
+
+            #[cfg(not(feature = "timeout"))]
+            handle_fut.await;
+
+            #[cfg(feature = "timeout")]
+            match handler_timeout {
+                None => handle_fut.await,
+                Some(timeout) => {
+                    let handler_with_timeout = futures_util::future::select(
+                        futures_timer::Delay::new(timeout),
+                        handle_fut,
+                    );
+
+                    if let Either::Left(((), _handler)) = handler_with_timeout.await {
+                        #[cfg(feature = "tracing")]
+                        {
+                            let msg_type = std::any::type_name::<M>();
+                            let actor_type = std::any::type_name::<A>();
+                            let timeout_seconds = timeout.as_secs();
+
+                            tracing::warn!(%msg_type, %actor_type, %timeout_seconds, "Handler execution timeout");
+                        }
+                    };
+                }
+            }
         })
     }
 }
@@ -191,6 +280,11 @@ impl<A> Clone for Box<dyn BroadcastMessageEnvelope<Actor = A>> {
     fn clone(&self) -> Self {
         BroadcastMessageEnvelope::clone(&**self)
     }
+}
+
+#[cfg(feature = "timeout")]
+pub(crate) struct TimedOut<M> {
+    phantom: PhantomData<M>,
 }
 
 #[cfg(feature = "metrics")]
