@@ -1,4 +1,5 @@
 use std::marker::PhantomData;
+use std::time::Instant;
 
 use catty::{Receiver, Sender};
 use futures_core::future::BoxFuture;
@@ -125,7 +126,14 @@ impl<A: Handler<M>, M: Message> MessageEnvelope for ReturningEnvelope<A, M> {
 
         Box::pin(async move {
             #[cfg(feature = "metrics")]
-            queue_timer.observe_duration();
+            {
+                let elapsed = (queue_timer.stop_and_record() * 1000.0) as u64;
+                #[cfg(feature = "tracing")]
+                {
+                    let msg_type = std::any::type_name::<M>();
+                    tracing::debug!(%msg_type, %elapsed, "Queue time");
+                }
+            }
 
             #[cfg(feature = "metrics")]
             let _processing_timer_will_automatically_observe_on_drop =
@@ -146,7 +154,17 @@ impl<A: Handler<M>, M: Message> MessageEnvelope for ReturningEnvelope<A, M> {
 
             #[cfg(feature = "timeout")]
             match handler_timeout {
-                None => handle_fut.await,
+                None => {
+                    let start = Instant::now();
+                    handle_fut.await;
+                    #[cfg(feature = "tracing")]
+                    {
+                        let msg_type = std::any::type_name::<M>();
+                        let elapsed = start.elapsed().as_millis();
+
+                        tracing::debug!(%msg_type, %elapsed, "Processing");
+                    }
+                }
                 Some(timeout) => {
                     let handler_with_timeout = futures_util::future::select(
                         futures_timer::Delay::new(timeout),
@@ -212,7 +230,15 @@ impl<A: Handler<M>, M: Message> MessageEnvelope for NonReturningEnvelope<A, M> {
 
         Box::pin(async move {
             #[cfg(feature = "metrics")]
-            self.queue_timer.observe_duration();
+            {
+                let elapsed = (self.queue_timer.stop_and_record() * 1000.0) as u64;
+
+                #[cfg(feature = "tracing")]
+                {
+                    let msg_type = std::any::type_name::<M>();
+                    tracing::debug!(%msg_type, %elapsed, "Queue time");
+                }
+            }
 
             #[cfg(feature = "metrics")]
             let _processing_timer_will_automatically_observe_on_drop =
@@ -230,7 +256,17 @@ impl<A: Handler<M>, M: Message> MessageEnvelope for NonReturningEnvelope<A, M> {
 
             #[cfg(feature = "timeout")]
             match handler_timeout {
-                None => handle_fut.await,
+                None => {
+                    let start = Instant::now();
+                    handle_fut.await;
+                    #[cfg(feature = "tracing")]
+                    {
+                        let msg_type = std::any::type_name::<M>();
+                        let elapsed = start.elapsed().as_millis();
+
+                        tracing::debug!(%msg_type, %elapsed, "Processing");
+                    }
+                }
                 Some(timeout) => {
                     let handler_with_timeout = futures_util::future::select(
                         futures_timer::Delay::new(timeout),
